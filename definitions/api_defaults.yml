@@ -1,0 +1,57 @@
+# definitions/api_defaults.yml
+image_and_audio_to_video:
+  input:
+    description: "Generate a talking-head video from one image + one audio file using D-ID."
+    type: object
+    required: true
+    properties:
+      image_url:
+        description: "Absolute URL or local file path to the avatar image (used only when calling the API directly)."
+        type: string
+        required: true
+      audio_url:
+        description: "Absolute URL or local file path to the audio file (used only when calling the API directly)."
+        type: string
+        required: true
+
+  authentication:
+    api_key:
+      description: "D-ID Basic Auth (username:password). Stored in did_ai_provider.settings."
+      type: string
+      default: ""
+      required: true
+
+  configuration:
+    expression:
+      label: "Facial Expression"
+      description: "Driver expression for the avatar."
+      type: string
+      default: "neutral"
+      required: false
+      constraints:
+        options:
+          neutral: "neutral"
+          happy: "happy"
+          serious: "serious"
+          surprise: "surprise"
+
+    stitch:
+      label: "Stitch frames"
+      description: "Whether D-ID should stitch frames into a single video."
+      type: boolean
+      default: true
+      required: false
+
+    reduce_noise:
+      label: "Reduce audio noise"
+      description: "Apply D-ID noise reduction to input audio."
+      type: boolean
+      default: true
+      required: false
+
+    subtitles:
+      label: "Generate subtitles"
+      description: "Whether to include subtitles in the output video."
+      type: boolean
+      default: false
+      required: false

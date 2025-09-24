@@ -1,0 +1,8 @@
+did_ai_provider.settings:
+  api_key: ''
+  base_url: 'https://api.d-id.com'
+  # Preferred defaults used by the provider + automations
+  default_source_image: ''   # Public file URL or external image URL for the avatar face
+  default_voice_id: ''       # If you pair with ElevenLabs, store its voice id here (optional)
+  default_driver: 'talking_photo'  # D‑ID product driver (e.g., talking_photo, studio, live_portrait)
+  request_timeout: 90

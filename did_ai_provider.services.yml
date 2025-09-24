@@ -1,0 +1,11 @@
+services:
+  did_ai_provider.api:
+    class: Drupal\did_ai_provider\DidApiService
+    arguments:
+      - '@http_client'
+      - '@config.factory'
+      - '@file_system'
+
+  logger.channel.did_ai_provider:
+    parent: logger.channel_base
+    arguments: ['did_ai_provider']

@@ -1,0 +1,7 @@
+did_ai_provider.settings:
+  title: 'D‑ID Provider'
+  description: 'Configure the D‑ID API and defaults.'
+  route_name: did_ai_provider.settings_form
+  parent: ai.admin_providers
+
+

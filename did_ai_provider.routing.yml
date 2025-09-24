@@ -1,0 +1,7 @@
+did_ai_provider.settings_form:
+  path: '/admin/config/ai/di-ai-provider'
+  defaults:
+    _form: '\Drupal\did_ai_provider\Form\DidAiSettingsForm'
+    _title: 'D‑ID Provider settings'
+  requirements:
+    _permission: 'administer ai providers'

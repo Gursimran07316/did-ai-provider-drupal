@@ -1,0 +1,9 @@
+name: 'D‑ID AI Provider'
+type: module
+description: 'Provides a D‑ID provider for the AI module and AI Automator (text/audio to talking‑head video).' 
+core_version_requirement: ^10 || ^11
+package: 'AI'
+dependencies:
+  - ai:ai
+  - key:key
+  
