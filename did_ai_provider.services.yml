@@ -5,6 +5,7 @@ services:
       - '@http_client'
       - '@config.factory'
       - '@file_system'
+      - '@key.repository'
 
   logger.channel.did_ai_provider:
     parent: logger.channel_base

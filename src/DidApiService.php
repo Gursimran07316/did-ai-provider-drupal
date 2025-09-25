@@ -1,13 +1,12 @@
 <?php
 
-
-
 namespace Drupal\did_ai_provider;
 
 use Drupal\Component\FileSystem\FileSystem;
 use Drupal\did_ai_provider\Form\DidAiSettingsForm;
 use Drupal\Core\Config\ConfigFactory;
 use Drupal\Core\File\FileSystemInterface;
+use Drupal\key\KeyRepositoryInterface; // ← NEW
 use GuzzleHttp\Client;
 
 /**
@@ -26,7 +25,7 @@ class DidApiService {
   protected FileSystemInterface $fileSystem;
 
   /**
-   * API Key.
+   * API Key (the actual "username:password" string from the Key module).
    */
   private string $apiKey;
 
@@ -42,13 +41,31 @@ class DidApiService {
    *   Http client.
    * @param \Drupal\Core\Config\ConfigFactory $configFactory
    *   The config factory.
+   * @param \Drupal\Core\File\FileSystemInterface $fileSystem
+   *   File system.
+   * @param \Drupal\key\KeyRepositoryInterface $keyRepository
+   *   Key repository to resolve the configured key name to its secret value.
    */
-  public function __construct(Client $client, ConfigFactory $configFactory, FileSystemInterface $fileSystem) {
+  public function __construct(
+    Client $client,
+    ConfigFactory $configFactory,
+    FileSystemInterface $fileSystem,
+    KeyRepositoryInterface $keyRepository // ← NEW
+  ) {
     $this->client = $client;
-    $this->apiKey = (string) ($configFactory->get('did_ai_provider.settings')->get('api_key') ?? '');
     $this->fileSystem = $fileSystem;
+
+    // The config stores the KEY NAME (e.g. "did_key"). Resolve it to the real secret.
+    $key_name = (string) ($configFactory->get('did_ai_provider.settings')->get('api_key') ?? '');
+    $resolved = $key_name ? $keyRepository->getKey($key_name) : NULL;
+    $this->apiKey = $resolved ? (string) $resolved->getKeyValue() : '';
+    \Drupal::logger('did_ai_provider')->notice('DidApiService constructed with API key length: @len', [
+      '@len' => strlen($this->apiKey),
+    ]);
   }
 
+  
+ 
   /**
    * Generate video from audio with an image syncronously.
    *
@@ -195,19 +212,16 @@ class DidApiService {
    *   The response.
    */
   public function uploadImage($imageUrl) {
-    $imageUrl = $this->checkAndCreateTemporaryImage($imageUrl);
-    $guzzleOptions['multipart'] = [
-      [
-        'name' => 'image',
-        'contents' => fopen($imageUrl, 'r'),
-        'filename' => $this->hashFilenameFromUrl($imageUrl),
-      ],
-    ];
-    $result = json_decode($this->makeRequest("images", [], 'POST', NULL, $guzzleOptions), TRUE);
-
+    $imagePath = $this->checkAndCreateTemporaryImage($imageUrl);
+    $imagePath = $this->realOpenPath($imagePath);
+    $guzzleOptions['multipart'] = [[
+      'name' => 'image',
+      'contents' => fopen($imagePath, 'r'),
+      'filename' => $this->hashFilenameFromUrl($imagePath),
+    ]];
+    $result = json_decode($this->makeRequest("images", [], 'POST', '', $guzzleOptions), TRUE);
     return $result;
   }
-
   /**
    * Check and create a temporary image, if its too large.
    *
@@ -217,18 +231,64 @@ class DidApiService {
    * @return string
    *   New or same url.
    */
+  protected function realOpenPath(string $uriOrUrl): string {
+    // Convert Drupal stream wrappers to real path; otherwise leave as-is.
+    $scheme = parse_url($uriOrUrl, PHP_URL_SCHEME);
+    if (in_array($scheme, ['public', 'private', 'temporary'], true)) {
+      $real = $this->fileSystem->realpath($uriOrUrl);
+      return $real ?: $uriOrUrl;
+    }
+    return $uriOrUrl;
+  }
+  
   public function checkAndCreateTemporaryImage($imageUrl) {
-    $size = getimagesize($imageUrl);
-    $filesize = filesize($imageUrl);
+    $scheme = parse_url($imageUrl, PHP_URL_SCHEME);
+  
+    if (in_array($scheme, ['http', 'https'], true)) {
+      // Remote: load bytes, then decide if we need to recompress.
+      $data = @file_get_contents($imageUrl);
+      if ($data === false) {
+        return $imageUrl; // Let the API error instead of fatal-ing here.
+      }
+      $im = @imagecreatefromstring($data);
+      if (!$im) {
+        return $imageUrl;
+      }
+      $w = imagesx($im);
+      $h = imagesy($im);
+      $needs_resize = ($w > 1920 || $h > 1080 || strlen($data) > 1000000);
+      if ($needs_resize) {
+        $tmpFile = $this->fileSystem->getTempDirectory() . '/did.jpg';
+        imagejpeg($im, $tmpFile, 90);
+        imagedestroy($im);
+        return $tmpFile;
+      }
+      imagedestroy($im);
+      return $imageUrl;
+    }
+  
+    // Local / stream-wrapped path.
+    $path = $this->realOpenPath($imageUrl);
+    $size = @getimagesize($path);
+    $filesize = @filesize($path);
+    if (!$size || $filesize === false) {
+      return $path;
+    }
     if ($size[0] > 1920 || $size[1] > 1080 || $filesize > 1000000) {
+      $data = @file_get_contents($path);
+      if ($data === false) {
+        return $path;
+      }
+      $im = @imagecreatefromstring($data);
+      if (!$im) {
+        return $path;
+      }
       $tmpFile = $this->fileSystem->getTempDirectory() . '/did.jpg';
-      $data = file_get_contents($imageUrl);
-      $im = imagecreatefromstring($data);
       imagejpeg($im, $tmpFile, 90);
       imagedestroy($im);
       return $tmpFile;
     }
-    return $imageUrl;
+    return $path;
   }
 
   /**
@@ -241,14 +301,13 @@ class DidApiService {
    *   The response.
    */
   public function uploadAudio($audioUrl) {
-    $guzzleOptions['multipart'] = [
-      [
-        'name' => 'audio',
-        'contents' => fopen($audioUrl, 'r'),
-        'filename' => $this->hashFilenameFromUrl($audioUrl),
-      ],
-    ];
-    $result = json_decode($this->makeRequest("audios", [], 'POST', NULL, $guzzleOptions), TRUE);
+    $audioPath = $this->realOpenPath($audioUrl);
+    $guzzleOptions['multipart'] = [[
+      'name' => 'audio',
+      'contents' => fopen($audioPath, 'r'),
+      'filename' => $this->hashFilenameFromUrl($audioPath),
+    ]];
+    $result = json_decode($this->makeRequest("audios", [], 'POST', '', $guzzleOptions), TRUE);
     return $result;
   }
 
@@ -289,7 +348,7 @@ class DidApiService {
     $options['read_timeout'] = 600;
     // Don't let Guzzle die, just forward body and status.
     $options['http_errors'] = FALSE;
-    // Basic auth.
+    // Basic auth expects ['username', 'password'] — your key must be "user:pass".
     $options['auth'] = explode(':', $this->apiKey);
     if ($body) {
       $options['body'] = $body;
