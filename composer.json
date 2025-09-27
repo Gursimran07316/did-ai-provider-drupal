@@ -3,6 +3,12 @@
   "type": "drupal-module",
   "description": "D‑ID provider for the Drupal AI module and AI Automator.",
   "license": "GPL-2.0-or-later",
+  "authors": [
+    {
+      "name": "Gursimran Khela",
+      "email": "gursimrankhela@gmail.com"
+    }
+  ],
   "require": {
     "drupal/ai": "^1.1"
   },
