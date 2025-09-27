@@ -52,7 +52,7 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
   /**
    * {@inheritDoc}
    */
-  public $title = 'Did Videoo Field: Generate story';
+  public $title = 'D-ID: Image + Audio → Video';
   /**
    * Construct like your DownloaderBase (no provider manager).
    */
@@ -70,12 +70,12 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
     $this->aiPluginManager = $aiPluginManager;
   }
   public function needsPrompt() {
-    return FALSE;  // tells the field UI: don’t render the prompt box
+    return FALSE;  
   }
   
   
   public function placeholderText() {
-    return '';     // optional: no placeholder if anything still reads it
+    return '';    
   }
   public function allowedInputs() {
     return [
@@ -103,7 +103,6 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
       'expression' => 'neutral',
       'wait_for_result' => TRUE,
       'timeout' => 600,
-      
       'image_field' => '',
     ];
   }
@@ -113,10 +112,7 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
    */
   public function buildConfigurationForm(array $form, FormStateInterface $form_state): array {
     $form = parent::buildConfigurationForm($form, $form_state);
-      // Hide prompt.
-  unset($form['automator_prompt']);
-
-  // Hide base mode + base field.
+   unset($form['automator_prompt']);
   if (isset($form['automator_input_mode'])) {
     $form['automator_input_mode']['#access'] = FALSE;
   }
@@ -151,7 +147,7 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
       '#max' => 1800,
     ];
 
-    // New: explicit field sources (by machine name).
+    
     $form['image_field'] = [
       '#type' => 'textfield',
       '#title' => $this->t('Image source field (optional)'),
@@ -169,13 +165,6 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
    */
   public function extraFormFields(ContentEntityInterface $entity, FieldDefinitionInterface $fieldDefinition, FormStateInterface $form_state, array $defaults = []): array {
     $form = parent::extraFormFields($entity, $fieldDefinition, $form_state, $defaults);
-  
-    $form['did'] = [
-      '#type' => 'details',
-      '#title' => $this->t('D-ID Settings'),
-      '#open' => TRUE,
-      '#weight' => 20,
-    ];
   
     // Build field options.
     $imageOptions = ['_none' => $this->t('No image — use presenter')];
@@ -208,7 +197,6 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
     $presenterOptions = ['' => $this->t('- Select a presenter -')];
     try {
       $presenters = $this->didApi->getPresenters();
-      // Expecting a ["presenters" => [ ... ]] shape as you pasted
       foreach (($presenters['presenters'] ?? []) as $p) {
         if (!empty($p['presenter_id']) && !empty($p['name'])) {
           $label = $p['name'];
@@ -239,7 +227,7 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
       ],
     ];
   
-    // Expression stays the same, but give it the automator_ prefix.
+
     $form['automator_expression'] = [
       '#type' => 'select',
       '#title' => $this->t('Expression'),
@@ -362,7 +350,6 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
     ];
   }
   public function generate(ContentEntityInterface $entity, FieldDefinitionInterface $field_definition, array $settings = []): array {
-    \Drupal::logger('did_ai_provider')->notice('Automator settings: @s', ['@s' => json_encode($settings)]);
     
     // 1) Resolve AUDIO from automator base_field (fallback to target field).
     $target_field_name = $field_definition->getName();
@@ -370,10 +357,7 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
     if ($audio_source_field === '') {
       $audio_source_field = $target_field_name;
     }
-    \Drupal::logger('did_ai_provider')->notice(
-      'Audio source field resolved to: @f (target=@t, base=@b)',
-      ['@f' => $audio_source_field, '@t' => $target_field_name, '@b' => ($settings['base_field'] ?? '')]
-    );
+  
     $audio_path = $this->firstFilePathByMimePrefix($entity, $audio_source_field, 'audio/');
     if (!$audio_path) {
       \Drupal::logger('did_ai_provider')->warning('No audio found on field @f.', ['@f' => $audio_source_field]);

@@ -118,7 +118,7 @@ public function generateVideoFromAudioAndPresenterSync(string $audioUrl, string 
   }
   return NULL;
 }
-// DidApiService.php
+
 
 public function isValidPresenterId(string $presenterId): bool {
   if ($presenterId === '') {
