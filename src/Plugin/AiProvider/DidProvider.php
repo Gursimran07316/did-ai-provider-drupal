@@ -74,11 +74,9 @@ protected DidApiService $client;
   public static function create(ContainerInterface $container, array $configuration, $plugin_id, $plugin_definition): static {
     /** @var static $instance */
     $instance = parent::create($container, $configuration, $plugin_id, $plugin_definition);
-    // Use YOUR service id, not the old one.
     $instance->client = $container->get('did_ai_provider.api');
     $instance->fileSystem = $container->get('file_system');
     $instance->fileUrlGenerator = $container->get('file_url_generator');
-    // Optional: use your dedicated logger channel.
     $instance->loggerFactory = $container->get('logger.factory');
     return $instance;
   }
@@ -87,8 +85,6 @@ protected DidApiService $client;
    * Destructor.
    */
   public function __destruct() {
-    // If you push any temporary managed files into $this->temporaryFiles,
-    // you can delete them here. Not used in this implementation.
     foreach ($this->temporaryFiles as $file) {
       try {
         $file->delete();
@@ -110,7 +106,6 @@ protected DidApiService $client;
    * {@inheritdoc}
    */
   public function getSupportedOperationTypes(): array {
-    // MUST match the OperationType id.
     return ['image_and_audio_to_video'];
   }
 
@@ -174,7 +169,6 @@ protected DidApiService $client;
    * {@inheritdoc}
    */
   public function getApiDefinition(): array {
-    // Optional: definition shown in AI Automator / Explorer.
     $path = $this->moduleHandler
       ->getModule('did_ai_provider')
       ->getPath() . '/definitions/api_defaults.yml';
