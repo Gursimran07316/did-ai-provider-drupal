@@ -126,7 +126,9 @@ class DidApiService {
     }
     return NULL;
   }
-
+  public function getHttpClient(): \GuzzleHttp\Client {
+    return $this->client;
+  }
   /**
    * Gets the presenters.
    *

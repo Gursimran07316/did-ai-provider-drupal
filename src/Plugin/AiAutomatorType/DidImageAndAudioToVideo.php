@@ -19,6 +19,10 @@ use Drupal\did_ai_provider\DidApiService;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 use Drupal\ai\AiProviderPluginManager;
 use Drupal\Core\DependencyInjection\DependencySerializationTrait;
+use Drupal\ai\Exception\AiRetryableException;
+use Drupal\Core\Url;
+use Drupal\file\FileInterface;
+use Drupal\Core\File\FileSystemInterface;
 /**
  * D-ID: Image + Audio → Video ().
  */
@@ -41,12 +45,14 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
    * @var array
    */
   protected array $providerInstances = [];
+  protected string $llmType = 'image_and_audio_to_video';
+  
 
   protected AiProviderPluginManager $aiPluginManager;
   /**
    * {@inheritDoc}
    */
-  public $title = 'Did Video Field: Generate story';
+  public $title = 'Did Videoo Field: Generate story';
   /**
    * Construct like your DownloaderBase (no provider manager).
    */
@@ -63,7 +69,19 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
     $this->didApi = $didApi;
     $this->aiPluginManager = $aiPluginManager;
   }
-
+  public function needsPrompt() {
+    return FALSE;  // tells the field UI: don’t render the prompt box
+  }
+  
+  
+  public function placeholderText() {
+    return '';     // optional: no placeholder if anything still reads it
+  }
+  public function allowedInputs() {
+    return [
+     'file'
+    ];
+  }
   /**
    * {@inheritdoc}
    */
@@ -96,6 +114,14 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
    */
   public function buildConfigurationForm(array $form, FormStateInterface $form_state): array {
     $form = parent::buildConfigurationForm($form, $form_state);
+      // Hide prompt.
+  unset($form['automator_prompt']);
+
+  // Hide base mode + base field.
+  if (isset($form['automator_input_mode'])) {
+    $form['automator_input_mode']['#access'] = FALSE;
+  }
+  unset($form['automator_base_field']);
 
     $form['expression'] = [
       '#type' => 'select',
@@ -150,6 +176,7 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
   public function extraFormFields(ContentEntityInterface $entity, FieldDefinitionInterface $fieldDefinition, FormStateInterface $form_state, array $defaults = []): array {
     $form = parent::extraFormFields($entity, $fieldDefinition, $form_state, $defaults);
   
+    // (Optional) keep a details wrapper just for grouping/UX.
     $form['did'] = [
       '#type' => 'details',
       '#title' => $this->t('D-ID Settings'),
@@ -157,12 +184,46 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
       '#weight' => 20,
     ];
   
-    // Expression.
-    $form['did']['expression'] = [
+    // Build options from fields on this bundle.
+    $imageOptions = [];
+    $audioOptions = [];
+    foreach ($entity->getFieldDefinitions() as $name => $def) {
+      $type = $def->getType();
+      if ($type === 'image') {
+        $imageOptions[$name] = $def->getLabel() . " ($name)";
+      }
+      elseif ($type === 'file' || ($type === 'entity_reference' && $def->getSetting('target_type') === 'media')) {
+        // Let file/media be selectable for both (we’ll filter by mime later).
+        $imageOptions[$name] = $def->getLabel() . " ($name)";
+        $audioOptions[$name] = $def->getLabel() . " ($name)";
+      }
+    }
+  
+    // IMPORTANT: top-level keys and `automator_` prefix
+    $form['automator_image_field'] = [
+      '#type' => 'select',
+      '#title' => $this->t('Image field'),
+      '#options' => $imageOptions,
+      '#default_value' => $defaults['automator_image_field'] ?? '',
+      '#required' => TRUE,
+      '#description' => $this->t('Field containing the still image (file or media).'),
+      '#parents' => ['automator_image_field'], // ensure top-level key
+    ];
+  
+    $form['automator_audio_field'] = [
+      '#type' => 'select',
+      '#title' => $this->t('Audio field'),
+      '#options' => $audioOptions,
+      '#default_value' => $defaults['automator_audio_field'] ?? '',
+      '#required' => TRUE,
+      '#description' => $this->t('Field containing the audio (file or media).'),
+      '#parents' => ['automator_audio_field'], // ensure top-level key
+    ];
+  
+    // (Optional) other options like expression/timeout can also be top-level with the prefix:
+    $form['automator_expression'] = [
       '#type' => 'select',
       '#title' => $this->t('Expression'),
-      '#description' => $this->t('Choose the expression to use.'),
-      '#default_value' => $defaults['expression'] ?? 'neutral',
       '#options' => [
         'neutral' => $this->t('Neutral'),
         'happy' => $this->t('Happy'),
@@ -171,63 +232,8 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
         'angry' => $this->t('Angry'),
         'sad' => $this->t('Sad'),
       ],
-    ];
-  
-    // Avatar source selector.
-    $form['did']['avatar_option'] = [
-      '#type' => 'select',
-      '#title' => $this->t('Avatar type'),
-      '#description' => $this->t('Choose the image to generate from.'),
-      '#default_value' => $defaults['avatar_option'] ?? 'field',
-      '#options' => [
-        'url' => $this->t('Image URL'),
-        'field' => $this->t('Image field'),
-      ],
-    ];
-  
-    // Image URL (when avatar_option = url).
-    $form['did']['file_url'] = [
-      '#type' => 'textfield',
-      '#title' => $this->t('Image URL'),
-      '#default_value' => $defaults['file_url'] ?? '',
-      '#description' => $this->t('Public URL (e.g. https://example.com/test.jpg) or internal file like public://test.jpg.'),
-      '#states' => [
-        'visible' => [
-          ':input[name="avatar_option"]' => ['value' => 'url'],
-        ],
-      ],
-    ];
-  
-    // List of available file/image fields on the bundle (when avatar_option = field).
-    $options = [];
-    foreach ($entity->getFieldDefinitions() as $name => $def) {
-      $type = $def->getType();
-      if (in_array($type, ['image', 'file'], true)) {
-        $options[$name] = $def->getLabel() . " ($name)";
-      }
-    }
-  
-    $form['did']['file_field'] = [
-      '#type' => 'select',
-      '#title' => $this->t('Image field'),
-      '#description' => $this->t('Choose the image field to use.'),
-      '#default_value' => $defaults['file_field'] ?? '',
-      '#options' => $options,
-      '#states' => [
-        'visible' => [
-          ':input[name="avatar_option"]' => ['value' => 'field'],
-        ],
-      ],
-    ];
-  
-    // Optional: choose the audio source field (same pattern).
-    $form['did']['audio_field'] = [
-      '#type' => 'select',
-      '#title' => $this->t('Audio field'),
-      '#description' => $this->t('Choose the audio field to use.'),
-      '#default_value' => $defaults['audio_field'] ?? '',
-      '#options' => $options,
-      '#required' => TRUE,
+      '#default_value' => $defaults['automator_expression'] ?? 'neutral',
+      '#parents' => ['automator_expression'],
     ];
   
     return $form;
@@ -336,7 +342,137 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
       'talk_id' => $result['id'] ?? NULL,
     ];
   }
+  public function generate(ContentEntityInterface $entity, FieldDefinitionInterface $field_definition, array $settings = []): array {
+    // Resolve sources (your current logic).
+    $image_field = trim((string) (
+      $settings['automator_image_field']
+      ?? $settings['image_field']               // optional fallback to plugin config
+      ?? $this->configuration['image_field']
+      ?? ''
+    ));
+    
+    $audio_field = trim((string) (
+      $settings['automator_audio_field']
+      ?? $settings['audio_field']               // optional fallback to plugin config
+      ?? $this->configuration['audio_field']
+      ?? ''
+    ));
+    
+    $expression = (string) (
+      $settings['automator_expression']
+      ?? $settings['expression']
+      ?? $this->configuration['expression']
+      ?? 'neutral'
+    );
+    $target_field_name = $field_definition->getName();
+  
+    $image_path = $image_field
+      ? $this->firstFilePathByMimePrefix($entity, $image_field, 'image/')
+      : $this->firstFilePathByMimePrefix($entity, $target_field_name, 'image/');
+    $audio_path = $audio_field
+      ? $this->firstFilePathByMimePrefix($entity, $audio_field, 'audio/')
+      : $this->firstFilePathByMimePrefix($entity, $target_field_name, 'audio/');
+  
+    if (!$image_path || !$audio_path) {
+      // No values => nothing to store.
+      return [];
+    }
+    \Drupal::logger('did_ai_provider')->info(
+      'DID fields: image=@i audio=@a', ['@i' => $image_field, '@a' => $audio_field]
+    );
+  
+    $wait = (bool) ($settings['wait_for_result'] ?? $this->configuration['wait_for_result'] ?? TRUE);
+    $timeout = (int) ($settings['timeout'] ?? $this->configuration['timeout'] ?? 600);
+  
+    // Call D-ID.
+    $result = $wait
+      ? $this->didApi->generateVideoFromAudioAndImageSync($audio_path, $image_path, $expression, $timeout)
+      : $this->didApi->generateVideoFromAudioAndImage($audio_path, $image_path, $expression);
+  
+    // If you’re not waiting, ask the Automator queue to retry later instead of failing silently.
+    if (!$wait && (!$result || empty($result['result_url']))) {
+      throw new AiRetryableException('D-ID render started; retry soon.');
+    }
+  
+    if (!$result || empty($result['result_url'])) {
+      // Returning [] means "no values generated" and the rule will no-op.
+      return [];
+    }
+  
+    // Download the MP4 with Guzzle (not file_get_contents).
+    $client = $this->didApi->getHttpClient(); // expose this in the service (see below)
+    try {
+      $res = $client->get((string) $result['result_url'], ['http_errors' => FALSE, 'timeout' => 120]);
+      if ($res->getStatusCode() !== 200) {
+        // If the video isn’t ready yet in queue mode, hint a retry.
+        if (!$wait) {
+          throw new AiRetryableException('D-ID video not ready (HTTP ' . $res->getStatusCode() . ').');
+        }
+        return [];
+      }
+      $bytes = (string) $res->getBody();
+    }
+    catch (\Throwable $e) {
+      if (!$wait) {
+        throw new AiRetryableException('D-ID download failed: ' . $e->getMessage());
+      }
+      return [];
+    }
+  
+    if (strlen($bytes) === 0) {
+      return [];
+    }
+  
+    // Hand back what the framework expects for a "file" target.
+    return [[
+      'filename' => 'did-' . substr(hash('sha256', (string) microtime(TRUE)), 0, 10) . '.mp4',
+      'binary'   => $bytes,
+    ]];
+  }
 
+
+public function verifyValue(ContentEntityInterface $entity, $value, FieldDefinitionInterface $field_definition, array $automator_config): bool {
+  return is_array($value)
+    && !empty($value['filename'])
+    && isset($value['binary'])
+    && is_string($value['binary'])
+    && $value['binary'] !== '';
+}
+
+public function storeValues(ContentEntityInterface $entity, array $values, FieldDefinitionInterface $field_definition, array $automator_config) {
+  if (empty($values)) {
+    return FALSE;
+  }
+
+  $file_repo = \Drupal::service('file.repository');
+  $fs = \Drupal::service('file_system');
+  $dir = 'public://did_videos';
+  $fs->prepareDirectory($dir, FileSystemInterface::CREATE_DIRECTORY);
+
+  $items = [];
+  foreach ($values as $v) {
+    if (!$this->verifyValue($entity, $v, $field_definition, $automator_config)) {
+      continue;
+    }
+    $safe = preg_replace('/[^A-Za-z0-9._-]/', '_', $v['filename']) ?: ('did_' . \Drupal::time()->getRequestTime() . '.mp4');
+    $uri = $dir . '/' . $safe;
+
+    $file = $file_repo->writeData($v['binary'], $uri, FileSystemInterface::EXISTS_RENAME);
+    if ($file instanceof FileInterface) {
+      $file->setPermanent();
+      $file->save();
+      $items[] = ['target_id' => $file->id()];
+    }
+  }
+
+  if (!$items) {
+    \Drupal::logger('did_ai_provider')->warning('DID Automator: no files persisted for @field.', ['@field' => $field_definition->getName()]);
+    return FALSE;
+  }
+
+  $entity->set($field_definition->getName(), $items);
+  return TRUE;
+}
   /**
    * Helper: get the first file path from a field whose MIME starts with $prefix.
    *
