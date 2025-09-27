@@ -105,7 +105,6 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
       'timeout' => 600,
       
       'image_field' => '',
-      'audio_field' => '',
     ];
   }
 
@@ -160,12 +159,7 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
       '#description' => $this->t('Machine name of the field containing the still image (e.g. "field_headshot"). Leave empty to use the target field and auto-detect image by MIME.'),
     ];
 
-    $form['audio_field'] = [
-      '#type' => 'textfield',
-      '#title' => $this->t('Audio source field (optional)'),
-      '#default_value' => (string) ($this->configuration['audio_field'] ?? ''),
-      '#description' => $this->t('Machine name of the field containing the audio (e.g. "field_voiceover"). Leave empty to use the target field and auto-detect audio by MIME.'),
-    ];
+ 
 
     return $form;
   }
@@ -185,7 +179,7 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
   
     // Build field options.
     $imageOptions = ['_none' => $this->t('No image — use presenter')];
-    $audioOptions = [];
+    
     foreach ($entity->getFieldDefinitions() as $name => $def) {
       $type = $def->getType();
       if ($type === 'image') {
@@ -209,15 +203,6 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
       '#parents' => ['automator_image_field'],
     ];
   
-    $form['automator_audio_field'] = [
-      '#type' => 'select',
-      '#title' => $this->t('Audio field'),
-      '#options' => $audioOptions,
-      '#default_value' => $defaults['automator_audio_field'] ?? '',
-      '#required' => TRUE,
-      '#description' => $this->t('Field containing the audio (file or media).'),
-      '#parents' => ['automator_audio_field'],
-    ];
   
     // Fetch presenters dynamically.
     $presenterOptions = ['' => $this->t('- Select a presenter -')];
@@ -378,12 +363,24 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
   }
   public function generate(ContentEntityInterface $entity, FieldDefinitionInterface $field_definition, array $settings = []): array {
     \Drupal::logger('did_ai_provider')->notice('Automator settings: @s', ['@s' => json_encode($settings)]);
-    $audio_field = trim((string) (
-      $settings['automator_audio_field']
-      ?? $settings['audio_field']
-      ?? $this->configuration['audio_field']
-      ?? ''
-    ));
+    
+    // 1) Resolve AUDIO from automator base_field (fallback to target field).
+    $target_field_name = $field_definition->getName();
+    $audio_source_field = trim((string) ($settings['base_field'] ?? ''));
+    if ($audio_source_field === '') {
+      $audio_source_field = $target_field_name;
+    }
+    \Drupal::logger('did_ai_provider')->notice(
+      'Audio source field resolved to: @f (target=@t, base=@b)',
+      ['@f' => $audio_source_field, '@t' => $target_field_name, '@b' => ($settings['base_field'] ?? '')]
+    );
+    $audio_path = $this->firstFilePathByMimePrefix($entity, $audio_source_field, 'audio/');
+    if (!$audio_path) {
+      \Drupal::logger('did_ai_provider')->warning('No audio found on field @f.', ['@f' => $audio_source_field]);
+      return [];
+    }
+  
+    // 2) Resolve IMAGE vs PRESENTER and other options.
     $image_field = trim((string) (
       $settings['automator_image_field']
       ?? $settings['image_field']
@@ -392,8 +389,9 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
     ));
     $presenter_id = trim((string) (
       $settings['automator_presenter_id']
-      ?? $settings['presenter_id']           // <-- add this fallback
-      ?? $this->configuration['presenter_id'] ?? ''
+      ?? $settings['presenter_id']
+      ?? $this->configuration['presenter_id']
+      ?? ''
     ));
     $expression = (string) (
       $settings['automator_expression']
@@ -401,28 +399,17 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
       ?? $this->configuration['expression']
       ?? 'neutral'
     );
-  
-    // Resolve audio path (required).
-    $target_field_name = $field_definition->getName();
-    $audio_path = $audio_field
-      ? $this->firstFilePathByMimePrefix($entity, $audio_field, 'audio/')
-      : $this->firstFilePathByMimePrefix($entity, $target_field_name, 'audio/');
-    if (!$audio_path) {
-      return []; // nothing to do
-    }
-  
     $wait = (bool) ($settings['wait_for_result'] ?? $this->configuration['wait_for_result'] ?? TRUE);
     $timeout = (int) ($settings['timeout'] ?? $this->configuration['timeout'] ?? 600);
   
-    // Branch: image provided vs presenter.
-    $use_presenter = ($image_field === '_none');
-  
-    if ($use_presenter) {
+    // 3) Call D-ID based on image vs presenter.
+    $result = NULL;
+    if ($image_field === '_none') {
       if ($presenter_id === '') {
         \Drupal::logger('did_ai_provider')->warning('No presenter selected while image set to _none.');
         return [];
       }
-      if (!$this->didApi->isValidPresenterId($presenter_id)) {
+      if (method_exists($this->didApi, 'isValidPresenterId') && !$this->didApi->isValidPresenterId($presenter_id)) {
         \Drupal::logger('did_ai_provider')->error('Invalid presenter_id: @id', ['@id' => $presenter_id]);
         return [];
       }
@@ -433,7 +420,7 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
     else {
       $image_path = $this->firstFilePathByMimePrefix($entity, $image_field, 'image/');
       if (!$image_path) {
-        // User chose an image field but it has no image yet → nothing to do.
+        \Drupal::logger('did_ai_provider')->warning('Image field @f selected but empty.', ['@f' => $image_field]);
         return [];
       }
       $result = $wait
@@ -442,40 +429,40 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
     }
   
     if (!$result) {
-      \Drupal::logger('did_ai_provider')->error('Presenter clip failed. presenter_id=@p audio=@a expr=@e', [
-        '@p' => $presenter_id ?: 'n/a',
-        '@a' => $audio_path,
-        '@e' => $expression,
-      ]);
+      \Drupal::logger('did_ai_provider')->error(
+        'D-ID generation failed. presenter=@p expr=@e audio_field=@af',
+        ['@p' => $presenter_id ?: 'n/a', '@e' => $expression, '@af' => $audio_source_field]
+      );
       return [];
     }
     if (empty($result['result_url'])) {
-      \Drupal::logger('did_ai_provider')->warning('Presenter clip has no result_url yet. Raw: @raw', [
-        '@raw' => json_encode($result),
-      ]);
+      \Drupal::logger('did_ai_provider')->warning('D-ID response has no result_url. Raw: @raw', ['@raw' => json_encode($result)]);
       return [];
     }
   
-    // Download video as before…
+    // 4) Download the video bytes and return for file storage.
     $client = $this->didApi->getHttpClient();
     try {
       $res = $client->get((string) $result['result_url'], ['http_errors' => FALSE, 'timeout' => 120]);
       if ($res->getStatusCode() !== 200) {
+        \Drupal::logger('did_ai_provider')->warning('Video download HTTP @c', ['@c' => $res->getStatusCode()]);
         return [];
       }
       $bytes = (string) $res->getBody();
     }
     catch (\Throwable $e) {
+      \Drupal::logger('did_ai_provider')->error('Video download failed: @m', ['@m' => $e->getMessage()]);
       return [];
     }
   
     if ($bytes === '') {
+      \Drupal::logger('did_ai_provider')->warning('Empty video bytes from result_url.');
       return [];
     }
   
     return [[
       'filename' => 'did-' . substr(hash('sha256', (string) microtime(TRUE)), 0, 10) . '.mp4',
-      'binary' => $bytes,
+      'binary'   => $bytes,
     ]];
   }
 
