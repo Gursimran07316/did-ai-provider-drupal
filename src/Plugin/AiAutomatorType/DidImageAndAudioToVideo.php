@@ -176,7 +176,6 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
   public function extraFormFields(ContentEntityInterface $entity, FieldDefinitionInterface $fieldDefinition, FormStateInterface $form_state, array $defaults = []): array {
     $form = parent::extraFormFields($entity, $fieldDefinition, $form_state, $defaults);
   
-    // (Optional) keep a details wrapper just for grouping/UX.
     $form['did'] = [
       '#type' => 'details',
       '#title' => $this->t('D-ID Settings'),
@@ -184,8 +183,8 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
       '#weight' => 20,
     ];
   
-    // Build options from fields on this bundle.
-    $imageOptions = [];
+    // Build field options.
+    $imageOptions = ['_none' => $this->t('No image — use presenter')];
     $audioOptions = [];
     foreach ($entity->getFieldDefinitions() as $name => $def) {
       $type = $def->getType();
@@ -193,21 +192,21 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
         $imageOptions[$name] = $def->getLabel() . " ($name)";
       }
       elseif ($type === 'file' || ($type === 'entity_reference' && $def->getSetting('target_type') === 'media')) {
-        // Let file/media be selectable for both (we’ll filter by mime later).
-        $imageOptions[$name] = $def->getLabel() . " ($name)";
+        // file/media can be used for audio too
         $audioOptions[$name] = $def->getLabel() . " ($name)";
+        // if you also want image from generic file fields:
+        $imageOptions[$name] = $def->getLabel() . " ($name)";
       }
     }
   
-    // IMPORTANT: top-level keys and `automator_` prefix
     $form['automator_image_field'] = [
       '#type' => 'select',
       '#title' => $this->t('Image field'),
       '#options' => $imageOptions,
-      '#default_value' => $defaults['automator_image_field'] ?? '',
-      '#required' => TRUE,
-      '#description' => $this->t('Field containing the still image (file or media).'),
-      '#parents' => ['automator_image_field'], // ensure top-level key
+      '#default_value' => $defaults['automator_image_field'] ?? '_none',
+      '#required' => FALSE,
+      '#description' => $this->t('Choose an image field, or select “No image — use presenter”.'),
+      '#parents' => ['automator_image_field'],
     ];
   
     $form['automator_audio_field'] = [
@@ -217,10 +216,45 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
       '#default_value' => $defaults['automator_audio_field'] ?? '',
       '#required' => TRUE,
       '#description' => $this->t('Field containing the audio (file or media).'),
-      '#parents' => ['automator_audio_field'], // ensure top-level key
+      '#parents' => ['automator_audio_field'],
     ];
   
-    // (Optional) other options like expression/timeout can also be top-level with the prefix:
+    // Fetch presenters dynamically.
+    $presenterOptions = ['' => $this->t('- Select a presenter -')];
+    try {
+      $presenters = $this->didApi->getPresenters();
+      // Expecting a ["presenters" => [ ... ]] shape as you pasted
+      foreach (($presenters['presenters'] ?? []) as $p) {
+        if (!empty($p['presenter_id']) && !empty($p['name'])) {
+          $label = $p['name'];
+          if (!empty($p['owner_id']) && $p['owner_id'] === 'PUBLIC_D-ID') {
+            $label .= ' (Public)';
+          }
+          $presenterOptions[$p['presenter_id']] = $label;
+        }
+      }
+    }
+    catch (\Throwable $e) {
+      // Fail open: UI still renders without options.
+    }
+  
+    $form['automator_presenter_id'] = [
+      '#type' => 'select',
+      '#title' => $this->t('Presenter (used when no image)'),
+      '#options' => $presenterOptions,
+      '#default_value' => $defaults['automator_presenter_id'] ?? '',
+      '#parents' => ['automator_presenter_id'],
+      '#states' => [
+        'visible' => [
+          ':input[name="automator_image_field"]' => ['value' => '_none'],
+        ],
+        'required' => [
+          ':input[name="automator_image_field"]' => ['value' => '_none'],
+        ],
+      ],
+    ];
+  
+    // Expression stays the same, but give it the automator_ prefix.
     $form['automator_expression'] = [
       '#type' => 'select',
       '#title' => $this->t('Expression'),
@@ -343,90 +377,105 @@ class DidImageAndAudioToVideo extends ExternalBase implements AiAutomatorTypeInt
     ];
   }
   public function generate(ContentEntityInterface $entity, FieldDefinitionInterface $field_definition, array $settings = []): array {
-    // Resolve sources (your current logic).
-    $image_field = trim((string) (
-      $settings['automator_image_field']
-      ?? $settings['image_field']               // optional fallback to plugin config
-      ?? $this->configuration['image_field']
-      ?? ''
-    ));
-    
+    \Drupal::logger('did_ai_provider')->notice('Automator settings: @s', ['@s' => json_encode($settings)]);
     $audio_field = trim((string) (
       $settings['automator_audio_field']
-      ?? $settings['audio_field']               // optional fallback to plugin config
+      ?? $settings['audio_field']
       ?? $this->configuration['audio_field']
       ?? ''
     ));
-    
+    $image_field = trim((string) (
+      $settings['automator_image_field']
+      ?? $settings['image_field']
+      ?? $this->configuration['image_field']
+      ?? '_none'
+    ));
+    $presenter_id = trim((string) (
+      $settings['automator_presenter_id']
+      ?? $settings['presenter_id']           // <-- add this fallback
+      ?? $this->configuration['presenter_id'] ?? ''
+    ));
     $expression = (string) (
       $settings['automator_expression']
       ?? $settings['expression']
       ?? $this->configuration['expression']
       ?? 'neutral'
     );
-    $target_field_name = $field_definition->getName();
   
-    $image_path = $image_field
-      ? $this->firstFilePathByMimePrefix($entity, $image_field, 'image/')
-      : $this->firstFilePathByMimePrefix($entity, $target_field_name, 'image/');
+    // Resolve audio path (required).
+    $target_field_name = $field_definition->getName();
     $audio_path = $audio_field
       ? $this->firstFilePathByMimePrefix($entity, $audio_field, 'audio/')
       : $this->firstFilePathByMimePrefix($entity, $target_field_name, 'audio/');
-  
-    if (!$image_path || !$audio_path) {
-      // No values => nothing to store.
-      return [];
+    if (!$audio_path) {
+      return []; // nothing to do
     }
-    \Drupal::logger('did_ai_provider')->info(
-      'DID fields: image=@i audio=@a', ['@i' => $image_field, '@a' => $audio_field]
-    );
   
     $wait = (bool) ($settings['wait_for_result'] ?? $this->configuration['wait_for_result'] ?? TRUE);
     $timeout = (int) ($settings['timeout'] ?? $this->configuration['timeout'] ?? 600);
   
-    // Call D-ID.
-    $result = $wait
-      ? $this->didApi->generateVideoFromAudioAndImageSync($audio_path, $image_path, $expression, $timeout)
-      : $this->didApi->generateVideoFromAudioAndImage($audio_path, $image_path, $expression);
+    // Branch: image provided vs presenter.
+    $use_presenter = ($image_field === '_none');
   
-    // If you’re not waiting, ask the Automator queue to retry later instead of failing silently.
-    if (!$wait && (!$result || empty($result['result_url']))) {
-      throw new AiRetryableException('D-ID render started; retry soon.');
+    if ($use_presenter) {
+      if ($presenter_id === '') {
+        \Drupal::logger('did_ai_provider')->warning('No presenter selected while image set to _none.');
+        return [];
+      }
+      if (!$this->didApi->isValidPresenterId($presenter_id)) {
+        \Drupal::logger('did_ai_provider')->error('Invalid presenter_id: @id', ['@id' => $presenter_id]);
+        return [];
+      }
+      $result = $wait
+        ? $this->didApi->generateVideoFromAudioAndPresenterSync($audio_path, $presenter_id, $expression, $timeout)
+        : $this->didApi->generateVideoFromAudioAndPresenter($audio_path, $presenter_id, $expression);
+    }
+    else {
+      $image_path = $this->firstFilePathByMimePrefix($entity, $image_field, 'image/');
+      if (!$image_path) {
+        // User chose an image field but it has no image yet → nothing to do.
+        return [];
+      }
+      $result = $wait
+        ? $this->didApi->generateVideoFromAudioAndImageSync($audio_path, $image_path, $expression, $timeout)
+        : $this->didApi->generateVideoFromAudioAndImage($audio_path, $image_path, $expression);
     }
   
-    if (!$result || empty($result['result_url'])) {
-      // Returning [] means "no values generated" and the rule will no-op.
+    if (!$result) {
+      \Drupal::logger('did_ai_provider')->error('Presenter clip failed. presenter_id=@p audio=@a expr=@e', [
+        '@p' => $presenter_id ?: 'n/a',
+        '@a' => $audio_path,
+        '@e' => $expression,
+      ]);
+      return [];
+    }
+    if (empty($result['result_url'])) {
+      \Drupal::logger('did_ai_provider')->warning('Presenter clip has no result_url yet. Raw: @raw', [
+        '@raw' => json_encode($result),
+      ]);
       return [];
     }
   
-    // Download the MP4 with Guzzle (not file_get_contents).
-    $client = $this->didApi->getHttpClient(); // expose this in the service (see below)
+    // Download video as before…
+    $client = $this->didApi->getHttpClient();
     try {
       $res = $client->get((string) $result['result_url'], ['http_errors' => FALSE, 'timeout' => 120]);
       if ($res->getStatusCode() !== 200) {
-        // If the video isn’t ready yet in queue mode, hint a retry.
-        if (!$wait) {
-          throw new AiRetryableException('D-ID video not ready (HTTP ' . $res->getStatusCode() . ').');
-        }
         return [];
       }
       $bytes = (string) $res->getBody();
     }
     catch (\Throwable $e) {
-      if (!$wait) {
-        throw new AiRetryableException('D-ID download failed: ' . $e->getMessage());
-      }
       return [];
     }
   
-    if (strlen($bytes) === 0) {
+    if ($bytes === '') {
       return [];
     }
   
-    // Hand back what the framework expects for a "file" target.
     return [[
       'filename' => 'did-' . substr(hash('sha256', (string) microtime(TRUE)), 0, 10) . '.mp4',
-      'binary'   => $bytes,
+      'binary' => $bytes,
     ]];
   }
 
